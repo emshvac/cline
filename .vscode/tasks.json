@@ -28,6 +28,11 @@
             "presentation": {
                 "group": "watch",
                 "reveal": "never"
+            },
+            "options": {
+                "env": {
+                    "PATH": "/home/jeffmosley/.nvm/versions/node/v20.17.0/bin:${env:PATH}"
+                }
             }
         },
         {
@@ -40,6 +45,11 @@
             "presentation": {
                 "group": "watch",
                 "reveal": "never"
+            },
+            "options": {
+                "env": {
+                    "PATH": "/home/jeffmosley/.nvm/versions/node/v20.17.0/bin:${env:PATH}"
+                }
             }
         },
 		{
@@ -52,6 +62,11 @@
             "presentation": {
                 "group": "watch",
                 "reveal": "never"
+            },
+            "options": {
+                "env": {
+                    "PATH": "/home/jeffmosley/.nvm/versions/node/v20.17.0/bin:${env:PATH}"
+                }
             }
         },
 		{
