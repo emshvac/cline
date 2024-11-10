@@ -1,6 +1,7 @@
 import { EventEmitter } from "events"
 import stripAnsi from "strip-ansi"
 import * as vscode from "vscode"
+import { shouldFilterLine } from "./terminal-filters"
 
 export interface TerminalProcessEvents {
 	line: [line: string]
@@ -23,9 +24,6 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 	isHot: boolean = false
 	private hotTimer: NodeJS.Timeout | null = null
 
-	// constructor() {
-	// 	super()
-
 	async run(terminal: vscode.Terminal, command: string) {
 		if (terminal.shellIntegration && terminal.shellIntegration.executeCommand) {
 			const execution = terminal.shellIntegration.executeCommand(command)
@@ -34,6 +32,7 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 			let isFirstChunk = true
 			let didOutputNonCommand = false
 			let didEmitEmptyLine = false
+			
 			for await (let data of stream) {
 				// 1. Process chunk and remove artifacts
 				if (isFirstChunk) {
@@ -110,11 +109,11 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 					data = lines.join("\n")
 				}
 
-				// FIXME: right now it seems that data chunks returned to us from the shell integration stream contains random commas, which from what I can tell is not the expected behavior. There has to be a better solution here than just removing all commas.
-				data = data.replace(/,/g, "")
+				// Filter out progress bars and noisy output
+				const lines = data.split("\n")
+				const filteredLines = lines.filter(line => !shouldFilterLine(line))
+				data = filteredLines.join("\n")
 
-				// 2. Set isHot depending on the command
-				// Set to hot to stall API requests until terminal is cool again
 				this.isHot = true
 				if (this.hotTimer) {
 					clearTimeout(this.hotTimer)
@@ -187,12 +186,14 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 		this.buffer += chunk
 		let lineEndIndex: number
 		while ((lineEndIndex = this.buffer.indexOf("\n")) !== -1) {
-			let line = this.buffer.slice(0, lineEndIndex).trimEnd() // removes trailing \r
+			let line = this.buffer.slice(0, lineEndIndex).trimEnd()// removes trailing \r
 			// Remove \r if present (for Windows-style line endings)
 			// if (line.endsWith("\r")) {
 			// 	line = line.slice(0, -1)
 			// }
-			this.emit("line", line)
+			if (!shouldFilterLine(line)) {
+				this.emit("line", line)
+			}
 			this.buffer = this.buffer.slice(lineEndIndex + 1)
 		}
 	}
@@ -200,7 +201,7 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 	private emitRemainingBufferIfListening() {
 		if (this.buffer && this.isListening) {
 			const remainingBuffer = this.removeLastLineArtifacts(this.buffer)
-			if (remainingBuffer) {
+			if (remainingBuffer && !shouldFilterLine(remainingBuffer)) {
 				this.emit("line", remainingBuffer)
 			}
 			this.buffer = ""
@@ -218,7 +219,10 @@ export class TerminalProcess extends EventEmitter<TerminalProcessEvents> {
 	getUnretrievedOutput(): string {
 		const unretrieved = this.fullOutput.slice(this.lastRetrievedIndex)
 		this.lastRetrievedIndex = this.fullOutput.length
-		return this.removeLastLineArtifacts(unretrieved)
+		const lines = this.removeLastLineArtifacts(unretrieved)
+			.split('\n')
+			.filter(line => !shouldFilterLine(line))
+		return lines.join('\n')
 	}
 
 	// some processing to remove artifacts like '%' at the end of the buffer (it seems that since vsode uses % at the beginning of newlines in terminal, it makes its way into the stream)
