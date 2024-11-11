@@ -47,6 +47,7 @@ import { truncateHalfConversation } from "./sliding-window"
 import { ClineProvider, GlobalFileNames } from "./webview/ClineProvider"
 import { showOmissionWarning } from "../integrations/editor/detect-omission"
 import { BrowserSession } from "../services/browser/BrowserSession"
+import { LargeFileWriter } from "../services/large-file/LargeFileWriter"
 
 const cwd =
 	vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0) ?? path.join(os.homedir(), "Desktop") // may or may not exist but fs checking existence would immediately ask for permission which would be bad UX, need to come up with a better solution
@@ -77,6 +78,7 @@ export class Cline {
 	didFinishAborting = false
 	abandoned = false
 	private diffViewProvider: DiffViewProvider
+	private largeFileWriter: LargeFileWriter
 
 	// streaming
 	private currentStreamingContentIndex = 0
@@ -104,6 +106,7 @@ export class Cline {
 		this.urlContentFetcher = new UrlContentFetcher(provider.context)
 		this.browserSession = new BrowserSession(provider.context)
 		this.diffViewProvider = new DiffViewProvider(cwd)
+		this.largeFileWriter = new LargeFileWriter(cwd)
 		this.customInstructions = customInstructions
 		this.alwaysAllowReadOnly = alwaysAllowReadOnly ?? false
 
@@ -874,30 +877,32 @@ export class Cline {
 				break
 			}
 			case "tool_use":
-				const toolDescription = () => {
-					switch (block.name) {
-						case "execute_command":
-							return `[${block.name} for '${block.params.command}']`
-						case "read_file":
-							return `[${block.name} for '${block.params.path}']`
-						case "write_to_file":
-							return `[${block.name} for '${block.params.path}']`
-						case "search_files":
-							return `[${block.name} for '${block.params.regex}'${
-								block.params.file_pattern ? ` in '${block.params.file_pattern}'` : ""
-							}]`
-						case "list_files":
-							return `[${block.name} for '${block.params.path}']`
-						case "list_code_definition_names":
-							return `[${block.name} for '${block.params.path}']`
-						case "browser_action":
-							return `[${block.name} for '${block.params.action}']`
-						case "ask_followup_question":
-							return `[${block.name} for '${block.params.question}']`
-						case "attempt_completion":
-							return `[${block.name}]`
-					}
-				}
+const toolDescription = () => {
+    switch (block.name) {
+        case "execute_command":
+            return `[${block.name} for '${block.params.command}']`
+        case "read_file":
+            return `[${block.name} for '${block.params.path}']`
+        case "write_to_file":
+            return `[${block.name} for '${block.params.path}']`
+        case "write_large_file":
+            return `[${block.name} for '${block.params.path}']`
+        case "search_files":
+            return `[${block.name} for '${block.params.regex}'${
+                block.params.file_pattern ? ` in '${block.params.file_pattern}'` : ""
+            }]`
+        case "list_files":
+            return `[${block.name} for '${block.params.path}']`
+        case "list_code_definition_names":
+            return `[${block.name} for '${block.params.path}']`
+        case "browser_action":
+            return `[${block.name} for '${block.params.action}']`
+        case "ask_followup_question":
+            return `[${block.name} for '${block.params.question}']`
+        case "attempt_completion":
+            return `[${block.name}]`
+    }
+}
 
 				if (this.didRejectTool) {
 					// ignore any tool content after user has rejected tool once
@@ -1018,9 +1023,9 @@ export class Cline {
 
 				switch (block.name) {
 					case "write_to_file": {
-						const relPath: string | undefined = block.params.path
-						let newContent: string | undefined = block.params.content
-						if (!relPath || !newContent) {
+    const relPath: string | undefined = block.params.path
+    let newContent: string | undefined = block.params.content
+    if (!relPath || !newContent) {
 							// checking for newContent ensure relPath is complete
 							// wait so we can determine if it's a new file or editing an existing file
 							break
@@ -1156,6 +1161,151 @@ export class Cline {
 							break
 						}
 					}
+
+case "write_large_file": {
+    const relPath: string | undefined = block.params.path
+    let newContent: string | undefined = block.params.content
+    if (!relPath || !newContent) {
+        break
+    }
+
+    // Check if file exists and set editType on DiffViewProvider
+    let fileExists: boolean
+    if (this.diffViewProvider.editType !== undefined) {
+        fileExists = this.diffViewProvider.editType === "modify"
+    } else {
+        const absolutePath = path.resolve(cwd, relPath)
+        fileExists = await fileExistsAtPath(absolutePath)
+        this.diffViewProvider.editType = fileExists ? "modify" : "create"
+    }
+
+    const sharedMessageProps: ClineSayTool = {
+        tool: fileExists ? "editedExistingFile" : "newFileCreated",
+        path: getReadablePath(cwd, removeClosingTag("path", relPath)),
+    }
+
+    try {
+        // Check for INIT/FINAL markers
+        const isInit = newContent.trim().startsWith("INIT")
+        const isFinal = newContent.trim().startsWith("FINAL")
+
+        if (block.partial) {
+            const partialMessage = JSON.stringify({
+                ...sharedMessageProps,
+                progress: {
+                    currentChunk: 1,
+                    totalChunks: Math.ceil(newContent.split('\n').length / 300)
+                }
+            })
+            await this.ask("tool", partialMessage, block.partial).catch(() => {})
+            break
+        }
+
+        if (!relPath) {
+            this.consecutiveMistakeCount++
+            pushToolResult(await this.sayAndCreateMissingParamError("write_large_file", "path"))
+            await this.largeFileWriter.revert()
+            break
+        }
+        if (!newContent) {
+            this.consecutiveMistakeCount++
+            pushToolResult(await this.sayAndCreateMissingParamError("write_large_file", "content"))
+            await this.largeFileWriter.revert()
+            break
+        }
+        this.consecutiveMistakeCount = 0
+
+        // Initialize on first chunk
+        if (isInit) {
+            // First connect the DiffViewProvider to LargeFileWriter
+            this.diffViewProvider.setLargeFileWriter(this.largeFileWriter)
+            // Then connect LargeFileWriter to DiffViewProvider
+            this.largeFileWriter.setDiffViewProvider(this.diffViewProvider)
+            // Then initialize the LargeFileWriter
+            await this.largeFileWriter.initializeWrite(relPath)
+            // Finally initialize the DiffViewProvider
+            await this.diffViewProvider.open(relPath)
+        }
+
+        // Add content and show progress
+        const progress = await this.largeFileWriter.addChunk(newContent)
+		// Update the diff view with the current progress
+        await this.diffViewProvider.update(progress.content, isFinal, true)        
+        const partialMessage = JSON.stringify({
+            ...sharedMessageProps,
+            progress: {
+                currentChunk: progress.currentChunk,
+                totalChunks: progress.totalChunks
+            }
+        })
+        await this.ask("tool", partialMessage, true).catch(() => {})
+
+        // On final chunk, show diff view and get approval
+        if (isFinal) {
+            const finalContent = await this.largeFileWriter.getCurrentContent()
+            await this.diffViewProvider.update(finalContent, true, true)
+
+            const completeMessage = JSON.stringify({
+                ...sharedMessageProps,
+                content: fileExists ? undefined : finalContent,
+                diff: fileExists
+                    ? formatResponse.createPrettyPatch(
+                        relPath,
+                        this.diffViewProvider.originalContent,
+                        finalContent
+                    )
+                    : undefined,
+            } satisfies ClineSayTool)
+
+            const didApprove = await askApproval("tool", completeMessage)
+            if (!didApprove) {
+                await this.largeFileWriter.revert()
+                await this.diffViewProvider.revertChanges()
+                break
+            }
+
+            // Save changes
+            const { newProblemsMessage, userEdits, finalContent: savedContent } = 
+                await this.diffViewProvider.saveChanges()
+            await this.largeFileWriter.save()
+            this.didEditFile = true
+
+            if (userEdits) {
+                await this.say(
+                    "user_feedback_diff",
+                    JSON.stringify({
+                        tool: fileExists ? "editedExistingFile" : "newFileCreated",
+                        path: getReadablePath(cwd, relPath),
+                        diff: userEdits,
+                    } satisfies ClineSayTool)
+                )
+                pushToolResult(
+                    `The user made the following updates to your content:\n\n${userEdits}\n\n` +
+                    `The updated content, which includes both your original modifications and the user's edits, has been successfully saved to ${relPath.toPosix()}. Here is the full, updated content of the file:\n\n` +
+                    `<final_file_content path="${relPath.toPosix()}">\n${savedContent}\n</final_file_content>\n\n` +
+                    `Please note:\n` +
+                    `1. You do not need to re-write the file with these changes, as they have already been applied.\n` +
+                    `2. Proceed with the task using this updated file content as the new baseline.\n` +
+                    `3. If the user's edits have addressed part of the task or changed the requirements, adjust your approach accordingly.` +
+                    `${newProblemsMessage}`
+                )
+            } else {
+                pushToolResult(`The content was successfully saved to ${relPath.toPosix()}.${newProblemsMessage}`)
+            }
+
+            // Reset both providers
+            await this.diffViewProvider.reset()
+            await this.largeFileWriter.reset()
+        }
+        break
+    } catch (error) {
+        await handleError("writing large file", error)
+        await this.largeFileWriter.revert()
+        await this.diffViewProvider.reset()
+        break
+    }
+}
+
 					case "read_file": {
 						const relPath: string | undefined = block.params.path
 						const sharedMessageProps: ClineSayTool = {
@@ -1204,6 +1354,7 @@ export class Cline {
 							break
 						}
 					}
+					
 					case "list_files": {
 						const relDirPath: string | undefined = block.params.path
 						const recursiveRaw: string | undefined = block.params.recursive
@@ -2180,5 +2331,5 @@ export class Cline {
 		}
 
 		return `<environment_details>\n${details.trim()}\n</environment_details>`
-	}
+    }
 }
