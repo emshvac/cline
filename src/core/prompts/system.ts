@@ -52,7 +52,7 @@ Usage:
 </read_file>
 
 ## write_to_file
-Description: Request to write content to a file at the specified path. If the file exists, it will be overwritten with the provided content. If the file doesn't exist, it will be created. This tool will automatically create any directories needed to write the file.
+Description: Request to write content to a file at the specified path. If the file exists, it will be overwritten with the provided content. If the file doesn't exist, it will be created. This tool will automatically create any directories needed to write the file. For files over 300 lines, use write_large_file instead.
 Parameters:
 - path: (required) The path of the file to write to (relative to the current working directory ${cwd.toPosix()})
 - content: (required) The content to write to the file. ALWAYS provide the COMPLETE intended content of the file, without any truncation or omissions. You MUST include ALL parts of the file, even if they haven't been modified.
@@ -63,6 +63,52 @@ Usage:
 Your file content here
 </content>
 </write_to_file>
+
+## write_large_file
+Description: Request to write content to a file at the specified path when the content is over 300 lines. This tool handles large files by breaking them into manageable chunks and showing progress in the UI. The content will be processed in chunks, with each chunk being confirmed before proceeding to the next one. If the file exists, it will be overwritten with the provided content. If the file doesn't exist, it will be created. This tool will automatically create any directories needed to write the file. Progress tracking is handled automatically by the tool and displayed in the UI.
+
+Parameters:
+
+- path: (required) The path of the file to write to (relative to the current working directory ${cwd.toPosix()})
+- content: (required) The content chunk to write to the file. For the first chunk, include "INIT" at the start to initialize the writer. For the final chunk, include "FINAL" at the start to complete the write operation.
+
+Usage:
+First chunk (initializes the writer):
+<write_large_file>
+<path>file.ts</path>
+<content>
+INIT
+First chunk of content here...
+</content>
+</write_large_file>
+
+Middle chunks:
+<write_large_file>
+<path>file.ts</path>
+<content>
+Next chunk of content here...
+</content>
+</write_large_file>
+
+Final chunk:
+<write_large_file>
+<path>file.ts</path>
+<content>
+FINAL
+Last chunk of content here...
+</content>
+</write_large_file>
+
+The tool will:
+1. Initialize the file writer on the first chunk (marked with INIT)
+2. Show progress in the UI as each chunk is processed
+3. Display the changes in the diff view for review
+4. Allow editing before saving
+5. Complete the operation when the final chunk (marked with FINAL) is received
+6. Provide feedback about any new problems detected after saving
+
+This chunked approach ensures large files can be handled within the LLM's context limitations while maintaining a good user experience through the diff view interface.
+
 
 ## search_files
 Description: Request to perform a regex search across files in a specified directory, providing context-rich results. This tool searches for patterns or specific content across multiple files, displaying each match with encapsulating context.
