@@ -244,6 +244,27 @@ export const ChatRowContent = ({
 						/>
 					</>
 				)
+			case "writeLargeFile":
+				return (
+					<>
+						<div style={headerStyle}>
+							{toolIcon("file")}
+							<span style={{ fontWeight: "bold" }}>Writing large file:</span>
+							{tool.progress && (
+								<span>
+									{tool.progress.currentChunk} of {tool.progress.totalChunks} chunks
+								</span>
+							)}
+						</div>
+						<CodeAccordian
+							isLoading={message.partial}
+							code={tool.content || ""}
+							path={tool.path!}
+							isExpanded={isExpanded}
+							onToggleExpand={onToggleExpand}
+						/>
+					</>
+				)
 			case "readFile":
 				return (
 					<>

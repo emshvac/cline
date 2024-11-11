@@ -84,11 +84,16 @@ export interface ClineSayTool {
 		| "listFilesRecursive"
 		| "listCodeDefinitionNames"
 		| "searchFiles"
+		| "writeLargeFile"
 	path?: string
 	diff?: string
 	content?: string
 	regex?: string
 	filePattern?: string
+	progress?: {
+		currentChunk: number
+		totalChunks: number
+	}
 }
 
 // must keep in sync with system prompt
