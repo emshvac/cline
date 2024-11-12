@@ -15,52 +15,99 @@ export class ChunkManager {
     private chunkFiles: string[] = []
     private sessionId: string
     private combinedContent: string = ""
+    private processedLines: number = 0
+    private totalFileLines: number = 0
+    private isInitialized: boolean = false
+    private averageChunkSize: number = 0
+    private lastChunkSize: number = 0
+    private isFinalChunkReceived: boolean = false
 
     constructor() {
-        // Create a unique session ID for this chunking operation
         this.sessionId = crypto.randomBytes(16).toString('hex')
     }
 
-    /**
-     * Initialize the temp directory for storing chunks
-     */
     async initialize(): Promise<void> {
-        // Create a unique temp directory for this chunking session
         this.tempDir = path.join(os.tmpdir(), `cline-chunks-${this.sessionId}`)
         await fs.mkdir(this.tempDir, { recursive: true })
         this.combinedContent = ""
         this.chunks = []
         this.chunkFiles = []
+        this.processedLines = 0
+        this.totalFileLines = 0
+        this.isInitialized = true
+        this.averageChunkSize = 0
+        this.lastChunkSize = 0
+        this.isFinalChunkReceived = false
     }
 
-    /**
-     * Add a new chunk of content
-     */
     async addChunk(content: string): Promise<ChunkProgress> {
-        if (!this.tempDir) {
+        if (!this.tempDir || !this.isInitialized) {
             throw new Error("ChunkManager not initialized")
         }
 
-        // Remove any INIT/FINAL markers before processing
+        // Process INIT/FINAL markers
         let processedContent = content
-        if (content.trim().startsWith("INIT")) {
+        const isInit = content.trim().startsWith("INIT")
+        const isFinal = content.trim().startsWith("FINAL")
+
+        if (isInit) {
             processedContent = content.replace(/^INIT\s*/, '')
-        } else if (content.trim().startsWith("FINAL")) {
+            this.processedLines = 0
+            this.totalFileLines = 0
+            this.averageChunkSize = 0
+            this.lastChunkSize = 0
+            this.isFinalChunkReceived = false
+        } else if (isFinal) {
             processedContent = content.replace(/^FINAL\s*/, '')
+            this.isFinalChunkReceived = true
         }
 
-        // Store chunk in memory
+        // Store chunk and update counts
         this.chunks.push(processedContent)
         this.combinedContent += processedContent
+
+        // Calculate lines in current chunk
+        const currentChunkLines = processedContent.split('\n').length
+        this.lastChunkSize = currentChunkLines
+        this.processedLines += currentChunkLines
+
+        // Update average chunk size and estimates
+        if (this.chunks.length === 1) {
+            this.averageChunkSize = currentChunkLines
+            this.totalFileLines = currentChunkLines * 3 // Initial estimate
+        } else {
+            this.averageChunkSize = this.processedLines / this.chunks.length
+            
+            if (!isInit && !isFinal) {
+                // Update total lines estimate based on chunk size trend
+                const chunkSizeTrend = this.lastChunkSize / this.averageChunkSize
+                if (chunkSizeTrend > 0.8) {
+                    // Current chunk is close to average size, expect more similar-sized chunks
+                    this.totalFileLines = Math.max(
+                        this.totalFileLines,
+                        Math.ceil(this.processedLines * 1.5)
+                    )
+                }
+            }
+        }
 
         // Write chunk to temp file
         const chunkFileName = path.join(this.tempDir, `chunk-${this.chunks.length}.txt`)
         await fs.writeFile(chunkFileName, processedContent, 'utf8')
         this.chunkFiles.push(chunkFileName)
 
+        // Set exact total on final chunk
+        if (isFinal) {
+            this.totalFileLines = this.processedLines
+        }
+
         // Calculate progress
-        const linesInContent = content.split('\n').length
-        const estimatedTotalChunks = Math.ceil(linesInContent / 300) // 300 lines per chunk
+        const estimatedTotalChunks = this.isFinalChunkReceived 
+            ? this.chunks.length  // We know this is the last chunk
+            : Math.max(
+                this.chunks.length + 1,  // At least one more chunk
+                Math.ceil(this.totalFileLines / this.averageChunkSize)  // Estimate based on average chunk size
+            )
 
         return {
             currentChunk: this.chunks.length,
@@ -69,16 +116,14 @@ export class ChunkManager {
         }
     }
 
-    /**
-     * Get the combined content of all chunks
-     */
     async getCombinedContent(): Promise<string> {
         return this.combinedContent
     }
 
-    /**
-     * Clean up temporary files and directory
-     */
+    isProcessing(): boolean {
+        return this.isInitialized && this.chunks.length > 0 && !this.isFinalChunkReceived
+    }
+
     async cleanup(): Promise<void> {
         if (this.tempDir) {
             // Delete all chunk files
@@ -102,6 +147,12 @@ export class ChunkManager {
             this.chunks = []
             this.chunkFiles = []
             this.combinedContent = ""
+            this.processedLines = 0
+            this.totalFileLines = 0
+            this.isInitialized = false
+            this.averageChunkSize = 0
+            this.lastChunkSize = 0
+            this.isFinalChunkReceived = false
         }
     }
 }
